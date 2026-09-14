@@ -2,10 +2,12 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+import { createRequire } from "node:module";
 import { publicBasePathRedirectPlugin } from "./vitePublicBasePathRedirect";
 import { connectionTypesPlugin } from "./viteConnectionTypesPlugin.ts";
 
 const host = process.env.TAURI_DEV_HOST;
+const require = createRequire(import.meta.url);
 const isTauri = !!host || !!process.env.TAURI_ENV_ARCH;
 const configuredBasePath = process.env.VITE_DBX_BASE_PATH || process.env.DBX_PUBLIC_BASE_PATH;
 const manualChunks: Record<string, string[]> = {
@@ -69,6 +71,9 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),
+      "monaco-vim": path.join(path.dirname(require.resolve("monaco-vim/package.json")), "dist/index.mjs"),
+      "monaco-editor/esm/vs/editor/editor.api": "monaco-editor/editor/editor.api",
+      "monaco-editor/esm/vs/editor/common/commands/shiftCommand": "monaco-editor/editor/common/commands/shiftCommand",
       // Prefer package source during app dev so shell parse changes need no rebuild.
       "@dbx-app/mongo-shell": path.resolve(import.meta.dirname, "../../packages/mongo-shell/src/index.ts"),
     },

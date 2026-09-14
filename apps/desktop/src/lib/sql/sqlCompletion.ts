@@ -1,5 +1,4 @@
 import { Cassandra, MariaSQL, MSSQL, MySQL, PLSQL, PostgreSQL, SQLite, StandardSQL } from "@codemirror/lang-sql";
-import type { Completion, CompletionInfo } from "@codemirror/autocomplete";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { buildMongoCompletionItemsFromContext, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { CLOUDFLARE_D1_COMMON_FUNCTION_NAMES } from "@/lib/sql/cloudflareD1";
@@ -1308,7 +1307,7 @@ export interface SqlCompletionItem {
   filterText?: string;
   type: "keyword" | "table" | "column" | "snippet" | "function" | "schema" | "variable" | "text";
   detail?: string;
-  info?: string | ((completion: Completion) => CompletionInfo | Promise<CompletionInfo>);
+  info?: string;
   apply?: string;
   replaceClosingQuote?: SqlCompletionClosingQuote;
   boost: number;

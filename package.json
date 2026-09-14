@@ -100,6 +100,8 @@
     "fast-xml-parser": "^5.11.1",
     "leaflet": "^1.9.4",
     "marked": "^18.0.4",
+    "monaco-editor": "0.56.0",
+    "monaco-vim": "0.4.4",
     "pako": "^3.0.1",
     "pinia": "^3.0.0",
     "pinyin-pro": "^3.28.2",

@@ -1473,6 +1473,7 @@ export default {
       starExpansionColumns: "{count} columns",
       insertSelectedColumns: "Insert selected columns ({count})",
       insertSelectedColumnsDetail: "Choose columns with the checkboxes, then insert them together",
+      chooseColumns: "Choose multiple columns…",
       selectColumnsBeforeInsert: "Select at least one column first",
       tableAlias: "Table alias",
       functionDescriptions: {

@@ -1388,6 +1388,7 @@ export default withEnglishFallback({
       starExpansionColumns: "{count} 列",
       insertSelectedColumns: "插入已选字段（{count}）",
       insertSelectedColumnsDetail: "勾选字段后一次性插入",
+      chooseColumns: "选择多个字段…",
       selectColumnsBeforeInsert: "请至少选择一个字段",
       tableAlias: "表别名",
       functionDescriptions: {

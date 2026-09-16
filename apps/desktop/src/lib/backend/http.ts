@@ -276,6 +276,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
+import { uuid } from "@/lib/common/utils";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1410,7 +1411,7 @@ export async function executeMultiWithProgress(
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
-  const executionId = options?.executionId ?? crypto.randomUUID();
+  const executionId = options?.executionId ?? uuid();
   const { executionId: _executionId, ...executeOptions } = options ?? {};
   const results = await executeMulti(connectionId, database, sql, schema, executionId, executeOptions);
   const total = results.length;

@@ -155,7 +155,7 @@ describe("useDataGridActions", () => {
     mocks.listIndexes.mockResolvedValue([]);
   });
 
-  it("manual refresh waits for cache deletion and fresh columns before building SQL", async () => {
+  it("manual refresh starts cache deletion without waiting and builds SQL from fresh columns", async () => {
     const tab = tableDataTab();
     mocks.tabs.push(tab);
     let release!: () => void;
@@ -168,26 +168,50 @@ describe("useDataGridActions", () => {
     const actions = useDataGridActions(computed(() => tab));
     const reload = actions.onReloadData(tab.id, tab.sql, "", "", "", 25, 50, "refresh");
     await vi.waitFor(() => expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledWith("object-meta:v1:postgres-1:app:public:users:"));
-    expect(mocks.getColumns).not.toHaveBeenCalled();
-    expect(mocks.buildTableSelectSql).not.toHaveBeenCalled();
+    // 持久缓存删除不再挡在元数据/查询前：列加载可以立即开始
+    await vi.waitFor(() => expect(mocks.getColumns).toHaveBeenCalledTimes(1));
     release();
     await reload;
     expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ columns: ["id", "added"], limit: 25, offset: 50 }));
   });
 
-  it("preserves rows when cache deletion fails and allows retry", async () => {
+  it("manual refresh keeps index discovery off the awaited path", async () => {
+    const tab = tableDataTab();
+    mocks.tabs.push(tab);
+    let releaseIndexes!: (indexes: unknown[]) => void;
+    mocks.listIndexes.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseIndexes = resolve;
+      }),
+    );
+    const actions = useDataGridActions(computed(() => tab));
+    const reload = actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
+    await reload;
+    // 等待段只拉列：SQL 已构建执行，listIndexes 仍未结算
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
+    expect(mocks.listIndexes).toHaveBeenCalledTimes(1);
+    releaseIndexes([]);
+  });
+
+  it("manual refresh reuses surviving primary keys intersected with fresh columns", async () => {
+    const tab = tableDataTab();
+    mocks.tabs.push(tab);
+    // 表结构变化：旧主键 id 被删，新主键 id2
+    mocks.getColumns.mockResolvedValue([{ name: "id2", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }]);
+    const actions = useDataGridActions(computed(() => tab));
+    await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
+    // 旧 PK 不在新列中：等待段不得把失效 PK 写回 tab 元数据
+    expect(tab.tableMeta?.primaryKeys).toEqual([]);
+  });
+
+  it("preserves rows when cache deletion fails and still executes", async () => {
     const tab = tableDataTab();
     mocks.tabs.push(tab);
     const result = tab.result;
-    const failure = new Error("cache deletion failed");
-    mocks.deleteSchemaCachePrefix.mockRejectedValueOnce(failure);
+    mocks.deleteSchemaCachePrefix.mockRejectedValueOnce(new Error("cache deletion failed"));
     const actions = useDataGridActions(computed(() => tab));
-    await expect(actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh")).rejects.toMatchObject({ name: "ObjectCacheInvalidationError", reason: failure });
-    expect(tab.result).toBe(result);
-    expect(mocks.getColumns).not.toHaveBeenCalled();
-    expect(mocks.executeTabSql).not.toHaveBeenCalled();
-    expect(mocks.setExecuting).toHaveBeenLastCalledWith(tab.id, false);
     await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
+    expect(tab.result).toBe(result);
     expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
   });
 

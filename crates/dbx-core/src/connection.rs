@@ -269,26 +269,15 @@ pub struct TransactionSession {
     pub pool_key: String,
     pub last_activity: std::time::Instant,
     pub busy: bool,
+    pub snapshot_rotation_safe: bool,
     pub connection_id: String,
     pub database: String,
     pub schema: Option<String>,
 }
 
 impl TransactionSession {
-    /// Whether this session holds a natively connected MySQL/PostgreSQL
-    /// connection whose transaction keeps a read snapshot that a rollback +
-    /// fresh BEGIN can rotate in place. Agent and external-driver sessions are
-    /// excluded: their rollback path closes the dedicated session, so they
-    /// cannot reopen in place.
-    pub fn connection_is_native_snapshot_dialect(&self) -> bool {
-        // The connection is inspected under its own lock elsewhere; here only
-        // the variant is needed, and reading the enum discriminant without the
-        // lock would race. Callers hold the sessions lock and pass the same
-        // decision point, so mirror them by locking briefly.
-        match self.connection.try_lock() {
-            Ok(conn) => matches!(&*conn, TxnConnection::Mysql(Some(_)) | TxnConnection::Postgres(_)),
-            Err(_) => false,
-        }
+    pub fn can_rotate_read_only_snapshot(&self, conn: &TxnConnection) -> bool {
+        self.snapshot_rotation_safe && matches!(conn, TxnConnection::Mysql(Some(_)) | TxnConnection::Postgres(_))
     }
 }
 

@@ -8,7 +8,7 @@ import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/table
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
-import { shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { editablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import * as api from "@/lib/backend/api";
 import type { ColumnInfo, QueryTab } from "@/types/database";
@@ -138,10 +138,6 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     });
   }
 
-  // columnsOnly：只重拉列（getColumns），跳过 listIndexes。供手动刷新的等待段
-  // 使用——列投影必须新鲜才能构建 SELECT，而主键/索引用旧值交集构建本次查询
-  // 是安全的（PK 名只进保护集合，不进 SQL 文本），完整索引元数据由随后的
-  // 后台全量刷新补齐（列命中 columns facet 缓存，只花一次 listIndexes）。
   async function refreshDataTabTableMeta(tab: QueryTab, options: { force?: boolean; columnsOnly?: boolean; trace?: { traceId: string; elapsed: () => string } } = {}): Promise<boolean> {
     if (tab.mode !== "data" || !tab.connectionId || !tab.database) return false;
     const tableMeta = tableMetaForDataTab(tab);
@@ -159,6 +155,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     // still receive its result. Only the latest request may update this tab.
     const requestToken = {};
     metadataRequests.set(tab, requestToken);
+    tab.tableMetaPending = true;
     const metadataGenerationAtStart = connectionStore.metadataGenerationFor(target.connectionId, target.database);
     const trace = options.trace;
 
@@ -175,7 +172,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     // 复用共享表元数据缓存（30s TTL + in-flight 去重），多个入口对同一张表
     // 不再各自往返 getColumns/listIndexes。跨连接生命周期的强制重建走 force，
     // 避免同一共享缓存把断链前的旧列再次交回本次 reload。
-    const loaded: { columns: TableMetadataColumns; primaryKeys: string[] } = options.columnsOnly
+    const loaded: { columns: TableMetadataColumns; primaryKeys: string[]; rowIdentityResolved: boolean } = options.columnsOnly
       ? await (async () => {
           const { columns } = await loadTableColumns({
             connectionId: target.connectionId,
@@ -188,9 +185,8 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
             catalog: target.catalog,
             force: options.force === true,
           });
-          const available = new Set(columns.map((column) => column.name.toLocaleLowerCase()));
-          const primaryKeys = (tab.tableMeta?.primaryKeys ?? []).filter((key) => available.has(key.toLocaleLowerCase()));
-          return { columns, primaryKeys };
+          const primaryKeys = editablePrimaryKeys(effectiveDatabaseTypeForConnection(config), columns, target.tableType);
+          return { columns, primaryKeys, rowIdentityResolved: false };
         })()
       : await (async () => {
           const { metadata } = await loadTableMetadata({
@@ -204,7 +200,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
             catalog: target.catalog,
             force: options.force === true,
           });
-          return { columns: metadata.columns, primaryKeys: metadata.primaryKeys };
+          return { columns: metadata.columns, primaryKeys: metadata.primaryKeys, rowIdentityResolved: metadata.rowIdentityResolved !== false };
         })();
     const columns = loaded.columns;
     console.info("[DBX][reloadData:metadata:get-columns:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), columnCount: columns.length });
@@ -229,7 +225,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       return false;
     }
     const primaryKeys = loaded.primaryKeys;
-    queryStore.setTableMeta(target.tabId, {
+    const refreshedMeta = {
       catalog: target.catalog,
       database: target.database,
       schema: target.schema,
@@ -237,7 +233,12 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tableType: target.tableType,
       columns,
       primaryKeys,
-    });
+    };
+    if (loaded.rowIdentityResolved) {
+      queryStore.setTableMeta(target.tabId, refreshedMeta);
+    } else {
+      queryStore.setTableMeta(target.tabId, refreshedMeta, { rowIdentityPending: true });
+    }
     return true;
   }
 
@@ -319,7 +320,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         }
         const connectionGeneration = connectionStore.metadataGenerationFor(tab.connectionId, tab.database);
         const lifecycleStale = isDataTabMetadataLifecycleStale(tab, connectionGeneration);
-        const shouldRefreshMetadata = lifecycleStale || !hasRealTableMetaColumns || metadataAgeMs > DATA_TAB_METADATA_TTL_MS;
+        const shouldRefreshMetadata = lifecycleStale || tab.tableMetaPending || !hasRealTableMetaColumns || metadataAgeMs > DATA_TAB_METADATA_TTL_MS;
         // Dameng 元数据必须与数据查询串行（同 useSidebarDataOpenRuntime），
         // 延后到查询完成后再启动。主动刷新和跨生命周期重建除外：必须先拿到新列再
         // 构建 SQL，否则第一次 toolbar reload 仍会沿用断链前的显式列列表。
@@ -336,7 +337,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
             });
         };
         if (lifecycleStale || intent === "refresh") {
-          if (!hasRealTableMetaColumns) tab.tableMetaPending = true;
+          tab.tableMetaPending = true;
           console.info("[DBX][reloadData:metadata:await:start]", { traceId, elapsed: elapsed(), reason: intent === "refresh" ? "manual-refresh" : "lifecycle-stale", metadataAgeMs });
           try {
             if (intent === "refresh") {
@@ -381,8 +382,6 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
           incomingSortMissing = rebuiltColumnNames.length > 0 && simpleDataGridOrderByReferencesMissingColumn(orderBy, rebuiltColumnNames);
           if (incomingSortMissing) tab.orderByInput = undefined;
           if (intent === "refresh" && !lifecycleStale) {
-            // 后台补齐索引/主键元数据：列 facet 刚写入缓存，这里只花一次
-            // listIndexes 往返；完成后 PK/可编辑性恢复最新（此前用旧 PK 交集）。
             void refreshDataTabTableMeta(tab, { force: false, trace: { traceId, elapsed } })
               .then(() => {
                 console.info("[DBX][reloadData:metadata:background-indexes:done]", { traceId, elapsed: elapsed() });

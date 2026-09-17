@@ -3995,6 +3995,38 @@ async fn execute_multi_mysql(
     let statements_ms = statements_started_at.elapsed().as_millis();
     drop(executor);
 
+    // Tab-scoped single-connection pools disable COM_RESET_CONNECTION on return
+    // (to preserve session state like temporary tables), so an open transaction
+    // left on the connection — a user-typed BEGIN/START TRANSACTION without
+    // COMMIT, or a canceled/aborted batch that skipped its cleanup — would pin
+    // the REPEATABLE READ snapshot for every later auto-commit query on that
+    // tab, making the tab read stale rows until disconnect. Closing any open
+    // transaction before returning the connection restores the auto-commit
+    // contract; ROLLBACK on an already-committed/implicit transaction is a
+    // server no-op, and a failure here only discards this connection.
+    {
+        let rollback_started_at = std::time::Instant::now();
+        match conn.query_drop("ROLLBACK").await {
+            Ok(()) => {
+                if rollback_started_at.elapsed() > std::time::Duration::from_millis(5) {
+                    log::info!(
+                        "[query][mysql-batch] trace_id={} open_txn_rollback_ms={}",
+                        trace_id,
+                        rollback_started_at.elapsed().as_millis()
+                    );
+                }
+            }
+            Err(error) => {
+                // A failed ROLLBACK leaves the transaction state unknown: drop
+                // the connection instead of returning it to the session pool.
+                log::warn!("[query][mysql-batch] trace_id={} open_txn_rollback_failed error={}", trace_id, error);
+                let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
+                state.remove_pool_by_key(pool_key).await;
+                return Ok(results);
+            }
+        }
+    }
+
     log::info!(
         "[query][mysql-batch] trace_id={} checkout_ms={} catalog_ms={} statements_ms={} total_ms={} result_count={} row_counts={:?}",
         trace_id,
@@ -5856,6 +5888,29 @@ pub async fn execute_in_manual_transaction_with_options(
             }
         }
     }
+
+    // Snapshot rotation for fully proven read-only batches (native MySQL/PG
+    // connections only): see rotate_clean_read_only_snapshot. Runs while the
+    // session is still marked busy so no concurrent execution can observe the
+    // half-rotated transaction. A rotation failure tears the session down and
+    // leans on the frontend rolled-back-session recovery (next execution opens
+    // a fresh session) instead of failing the already-successful batch.
+    if manual_txn_batch_fully_proven_read_only(&results) && {
+        let sessions = state.transaction_sessions.read().await;
+        sessions.get(txn_session_id).map(|session| session.connection_is_native_snapshot_dialect()).unwrap_or(false)
+    } {
+        if let Err(rotation_error) = rotate_clean_read_only_snapshot(&mut conn, schema).await {
+            let removed = {
+                let mut sessions = state.transaction_sessions.write().await;
+                sessions.remove(txn_session_id).is_some()
+            };
+            if removed {
+                let _ = rollback_manual_txn_connection(&mut conn).await;
+                release_manual_txn_session_pool(state, &connection_id, &mut conn).await;
+            }
+            let _ = rotation_error;
+        }
+    }
     drop(conn);
 
     let should_watch = {
@@ -6068,7 +6123,55 @@ where
     stream_result
 }
 
-async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), String> {
+/// Whether a finished manual-transaction batch was fully proven read-only, so
+/// the transaction still holds only a read view and no user data state. Factored
+/// out so the snapshot-rotation decision is unit-testable without a database.
+fn manual_txn_batch_fully_proven_read_only(results: &[ExecuteMultiResult]) -> bool {
+    !results.is_empty() && results.iter().all(|result| result.manual_transaction_proven_read_only)
+}
+
+/// Rotate the transaction on a natively-connected MySQL/PostgreSQL session after
+/// a fully proven read-only batch. MySQL REPEATABLE READ (and PostgreSQL when
+/// the server default was changed to a snapshot isolation) pins the read view of
+/// the first SELECT for the whole transaction: a user who keeps polling a clean
+/// read-only session would otherwise never see rows committed by others, and the
+/// clean-state toolbar hides Commit/Rollback, leaving disconnect/reconnect as
+/// the only visible way out. A rollback of a read-only transaction and a fresh
+/// BEGIN are both cheap metadata operations, and the batch gate keeps this off
+/// every write path. Failures here never fail the (already successful) batch:
+/// the session is torn down instead and the frontend's existing
+/// rolled-back-session recovery transparently opens a new one on the next run.
+async fn rotate_clean_read_only_snapshot(conn: &mut TxnConnection, schema: Option<&str>) -> Result<(), String> {
+    match conn {
+        TxnConnection::Mysql(Some(conn)) => {
+            conn.query_drop("ROLLBACK").await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
+            conn.query_drop("START TRANSACTION").await.map_err(|e| format!("START TRANSACTION failed: {e}"))?;
+            Ok(())
+        }
+        TxnConnection::Postgres(conn) => {
+            conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
+            conn.execute_typed("BEGIN", &[]).await.map_err(|e| format!("BEGIN failed: {e}"))?;
+            if let Some(schema) = schema {
+                db::postgres::set_postgres_search_path(
+                    conn,
+                    schema,
+                    db::postgres::PostgresSearchPathContext::LocalTransaction,
+                    db::connection_timeout(),
+                )
+                .await
+                .map_err(|e| format!("SET search_path failed: {e}"))?;
+            }
+            Ok(())
+        }
+        // Agent and external-driver sessions cannot reopen in place (their
+        // rollback path closes the dedicated session), so they keep the
+        // snapshot semantics; proven-read-only markers for those dialects do
+        // not reach this helper's native variants in practice.
+        _ => Ok(()),
+    }
+}
+
+pub(crate) async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), String> {
     rollback_manual_txn_connection_with_postgres_timeout(conn, None).await
 }
 
@@ -6475,6 +6578,32 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 mod tests {
     use super::*;
     use crate::query_cancel::RunningTaskMetadata;
+
+    #[test]
+    fn manual_txn_batch_proven_read_only_requires_non_empty_all_proven_results() {
+        // Empty batch (e.g. comments-only script) must not rotate: there is no
+        // snapshot to renew and rotating would churn a BEGIN for nothing.
+        assert!(!manual_txn_batch_fully_proven_read_only(&[]));
+
+        let unproven =
+            vec![ExecuteMultiResult::success_with_optional_server_large_values(empty_query_result(1), false)];
+        assert!(!manual_txn_batch_fully_proven_read_only(&unproven));
+
+        let proven = unproven
+            .clone()
+            .into_iter()
+            .map(|result| result.with_manual_transaction_proven_read_only())
+            .collect::<Vec<_>>();
+        assert!(manual_txn_batch_fully_proven_read_only(&proven));
+
+        // One write statement anywhere in the batch keeps the transaction.
+        let mixed = vec![
+            ExecuteMultiResult::success_with_optional_server_large_values(empty_query_result(1), false)
+                .with_manual_transaction_proven_read_only(),
+            ExecuteMultiResult::success_with_optional_server_large_values(empty_query_result(1), false),
+        ];
+        assert!(!manual_txn_batch_fully_proven_read_only(&mixed));
+    }
 
     #[test]
     fn redshift_queries_prefer_text_protocol() {

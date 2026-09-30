@@ -87,6 +87,8 @@ import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
+import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
+import DataGridTextSortWorkbench from "@/components/grid/DataGridTextSortWorkbench.vue";
 import DataGridTableInfoPanels from "@/components/grid/DataGridTableInfoPanels.vue";
 import DataGridColumnFilterPopover from "@/components/grid/DataGridColumnFilterPopover.vue";
 import DataGridCellDetailHeader from "@/components/grid/DataGridCellDetailHeader.vue";
@@ -327,6 +329,7 @@ import type { GridSnapshotSource } from "@/lib/gridSnapshot/gridSnapshot";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 import { useDataGridEditor } from "@/composables/useDataGridEditor";
 import { useDataGridSort } from "@/composables/useDataGridSort";
+import { buildDataGridStructuredOrderBy, combineDataGridOrderByInputs, useDataGridSortBuilder } from "@/composables/useDataGridSortBuilder";
 import { useDataGridSearch, type DataGridSearchMatch } from "@/composables/useDataGridSearch";
 import { findDataGridReplacementMatches, prepareDataGridCellReplacements, type DataGridReplaceScope } from "@/lib/dataGrid/dataGridReplace";
 import { useDataGridResultLifecycle } from "@/composables/useDataGridResultLifecycle";
@@ -623,7 +626,7 @@ function logDataGridTiming(message: string, payload?: Record<string, unknown>) {
 const emit = defineEmits<{
   reload: [sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
   paginate: [offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean];
-  sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
+  sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, executionOrderBy?: string];
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
@@ -1218,6 +1221,12 @@ const filterModeOptions = computed(() => allFilterModeOptions.filter((option) =>
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
 const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", props.tableMeta?.columns.map((column) => column.name).join("\0") ?? ""].join("\u0001"));
+const sortBuilderScopeKey = computed(() =>
+  JSON.stringify({
+    filterScope: structuredFilterScopeKey.value,
+    columns: filterBuilderColumnOptions.value,
+  }),
+);
 function isStructuredFilterRuleComplete(rule: StructuredFilterRule): boolean {
   return filterModeIsSupportedForDatabase(rule.mode, resolvedDatabaseType.value) && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue);
 }
@@ -2020,8 +2029,7 @@ watch(whereFilterInput, () => {
 });
 
 function clearOrderByInput() {
-  orderByInput.value = "";
-  void applyOrderBySearch();
+  void clearStructuredSortRules();
 }
 
 watch(orderByInput, (value) => {
@@ -2046,6 +2054,78 @@ watch(
 );
 
 const isApplyingWhere = ref(false);
+const sortBuilder = useDataGridSortBuilder({
+  columns: filterBuilderColumnOptions,
+  cacheKey: structuredFilterCacheKey,
+  scopeKey: sortBuilderScopeKey,
+  createId: uuid,
+});
+const structuredSortRules = sortBuilder.rules;
+const sortBuilderOpen = sortBuilder.open;
+const appliedStructuredOrderByInput = sortBuilder.appliedOrderByInput;
+const sortButtonCount = sortBuilder.activeRuleCount;
+const sortButtonActive = computed(() => !!appliedStructuredOrderByInput.value);
+const applyingOnlyStructuredSort = ref(false);
+const sortSqlPreview = computed(() => {
+  const draftStructuredOrderBy = buildDataGridStructuredOrderBy(structuredSortRules.value, queryColumnRef) ?? "";
+  const orderBy = combineDataGridOrderByInputs(orderByInput.value, draftStructuredOrderBy);
+  return orderBy ? `ORDER BY ${orderBy}` : "";
+});
+
+function copySortSqlPreview() {
+  if (!sortSqlPreview.value) return;
+  void copyText(sortSqlPreview.value);
+  toast(t("grid.sortSqlCopied"));
+}
+
+function setSortBuilderOpen(value: boolean) {
+  sortBuilder.setOpen(value);
+}
+
+async function applyStructuredSortRules() {
+  const nextOrderBy = buildDataGridStructuredOrderBy(structuredSortRules.value, queryColumnRef);
+  if (nextOrderBy === undefined) {
+    toast(t("grid.sortBuilderCompleteRuleFirst"));
+    return;
+  }
+  const applied = await applyOrderBySearch(undefined, nextOrderBy);
+  if (!applied) return;
+  if (filterEditorView.value === "quick") sortBuilder.setOpen(false);
+}
+
+async function applyOnlyStructuredSortRule(ruleId: string) {
+  if (!canUseWhereSearch.value || applyingOnlyStructuredSort.value || isApplyingWhere.value) return;
+  const rule = structuredSortRules.value.find((item) => item.id === ruleId);
+  if (!rule?.columnName) {
+    toast(t("grid.sortBuilderCompleteRuleFirst"));
+    return;
+  }
+  const nextOrderBy = buildDataGridStructuredOrderBy([{ ...rule, disabled: false }], queryColumnRef);
+  if (!nextOrderBy) {
+    toast(t("grid.sortBuilderCompleteRuleFirst"));
+    return;
+  }
+  applyingOnlyStructuredSort.value = true;
+  const scopeKey = sortBuilderScopeKey.value;
+  const cacheKey = structuredFilterCacheKey.value;
+  try {
+    sortBuilder.enableOnlyRule(ruleId);
+    const applied = await applyOrderBySearch(undefined, nextOrderBy);
+    if (applied && filterEditorView.value === "quick" && scopeKey === sortBuilderScopeKey.value && cacheKey === structuredFilterCacheKey.value) sortBuilder.setOpen(false);
+  } finally {
+    applyingOnlyStructuredSort.value = false;
+  }
+}
+
+async function clearStructuredSortRules() {
+  if (isApplyingWhere.value) return;
+  sortBuilder.clear();
+  orderByInput.value = "";
+  await applyOrderBySearch(undefined, "");
+}
+
+watch(filterEditorView, () => sortBuilder.setOpen(false));
+
 const rowStatusFilter = ref<RowStatusFilter>("all");
 const gridRef = ref<HTMLDivElement>();
 const dataGridTopbarRef = ref<HTMLDivElement>();
@@ -3463,8 +3543,9 @@ function currentWhereInput(): string | undefined {
 }
 
 function currentOrderBy(): string | undefined {
-  const structuredOrderBy = sortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
-  return orderByInput.value.trim() || structuredOrderBy;
+  const columnOrderBy = sortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
+  const manualOrderBy = orderByInput.value.trim() || columnOrderBy;
+  return combineDataGridOrderByInputs(manualOrderBy, appliedStructuredOrderByInput.value);
 }
 
 function executeServerPageJump(targetPage: number, updateCurrentPage = false) {
@@ -3892,7 +3973,7 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
     context: props.context,
     infiniteScroll: infiniteScrollEnabled.value,
     filterActive: !!currentWhereInput() || hasLocalColumnFilters.value || (dataGridSearchMode.value === "filter" && !!deferredClientSearchText.value),
-    orderActive: !!orderByInput.value.trim() || !!sortCol.value,
+    orderActive: !!currentOrderBy(),
     columns: request.columns,
     sourceColumns: props.sourceColumns,
     rows: request.rows,
@@ -4041,7 +4122,7 @@ const editor = useDataGridEditor({
   searchText,
   whereFilterInput,
   currentWhereInput: computed(() => currentWhereInput()),
-  orderByInput,
+  orderByInput: computed(() => currentOrderBy() ?? ""),
   rowStatusFilter,
   dataGridQuickEntryEnabled: computed(() => settingsStore.editorSettings.dataGridQuickEntry),
   confirmDangerousRowDeletion: computed(() => settingsStore.editorSettings.confirmDangerousSqlExecution),
@@ -5521,7 +5602,7 @@ function currentViewProbe(): string {
     largeValueCells: props.result.large_value_cells,
     navigation: {
       whereInput: currentWhereInput(),
-      orderByInput: orderByInput.value,
+      orderByInput: currentOrderBy() ?? "",
       pageOffset: props.pageOffset,
       pageLimit: pageSize.value,
       sortColumn: props.sortColumn,
@@ -6500,7 +6581,8 @@ function applyColumnSort(column: string, columnIndex: number, direction: "asc" |
     clearSort();
     syncOrderByInputWithSort(null, null);
   }
-  emit("sort", column, columnIndex, direction, currentWhereInput(), mode);
+  if (mode === "database" && appliedStructuredOrderByInput.value) emit("sort", column, columnIndex, direction, currentWhereInput(), mode, currentOrderBy());
+  else emit("sort", column, columnIndex, direction, currentWhereInput(), mode);
 }
 
 function selectHeaderSort(value: string, column: string, columnIndex: number) {
@@ -6579,9 +6661,12 @@ function waitForTableMeta(timeoutMs = 2500): Promise<DataGridTableMeta | null> {
   });
 }
 
-async function applyOrderBySearch() {
-  if (!props.onExecuteSql) return;
-  const orderByClause = orderByInput.value.trim() || undefined;
+async function applyOrderBySearch(_value?: string, structuredOrderByOverride?: string): Promise<boolean> {
+  if (!props.onExecuteSql) return false;
+  const structuredOrderBy = structuredOrderByOverride === undefined ? appliedStructuredOrderByInput.value : structuredOrderByOverride;
+  const orderByClause = combineDataGridOrderByInputs(orderByInput.value, structuredOrderBy);
+  const sortScopeKey = sortBuilderScopeKey.value;
+  const sortCacheKey = structuredFilterCacheKey.value;
   emit("update:orderByInput", orderByInput.value);
   if (orderByClause) rememberDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByClause);
   isApplyingWhere.value = true;
@@ -6590,7 +6675,7 @@ async function applyOrderBySearch() {
   clearSort();
   try {
     const tableMeta = await waitForTableMeta();
-    if (!tableMeta) return;
+    if (!tableMeta) return false;
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
       driverProfile: props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined,
@@ -6613,8 +6698,11 @@ async function applyOrderBySearch() {
     });
     markConditionInputsApplied();
     await props.onExecuteSql(sql);
+    if (structuredOrderByOverride !== undefined && sortScopeKey === sortBuilderScopeKey.value && sortCacheKey === structuredFilterCacheKey.value) sortBuilder.markApplied(structuredOrderByOverride);
+    return true;
   } catch (e: any) {
     queryControlError.value = String(e?.message || e);
+    return false;
   } finally {
     isApplyingWhere.value = false;
   }
@@ -6645,7 +6733,7 @@ async function applyWhereFilter() {
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
-      orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
+      orderBy: currentOrderBy(),
       limit: pageSize.value,
       injectDefaultTimeSeriesWhere: true,
       whereInput,
@@ -12454,6 +12542,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   v-model:where-input="whereFilterInput"
                   v-model:order-by-input="orderByInput"
                   v-model:filter-builder-open="filterBuilderOpen"
+                  :sort-builder-open="sortBuilderOpen"
                   :filter-editor-view="filterEditorView"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
                   :condition-columns="conditionColumns"
@@ -12464,6 +12553,11 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :leading-border="!!(useTransaction && editable && hasDataGridSaveTarget)"
                   :filter-button-active="filterButtonActive"
                   :filter-button-count="filterButtonCount"
+                  :sort-button-active="sortButtonActive"
+                  :sort-button-count="sortButtonCount"
+                  :sort-rules="structuredSortRules"
+                  :sort-builder-busy="isApplyingWhere"
+                  :sort-apply-only-busy="applyingOnlyStructuredSort"
                   :has-local-column-filters="hasLocalColumnFilters"
                   :local-filter-count="localFilterCount"
                   :local-filter-summaries="localFilterSummaries"
@@ -12475,6 +12569,15 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :apply-where="applyWhereFilter"
                   :apply-order-by="applyOrderBySearch"
                   :clear-order-by="clearOrderByInput"
+                  @update:sort-builder-open="setSortBuilderOpen"
+                  @add-sort-rule="sortBuilder.addRule"
+                  @remove-sort-rule="sortBuilder.removeRule"
+                  @move-sort-rule="sortBuilder.moveRule"
+                  @update-sort-rule="sortBuilder.updateRule"
+                  @apply-only-sort-rule="applyOnlyStructuredSortRule"
+                  @reset-sort-rules="sortBuilder.reset"
+                  @clear-sort-rules="clearStructuredSortRules"
+                  @apply-sort-rules="applyStructuredSortRules"
                   @update:column-search="filterBuilderColumnSearch = $event"
                   @ensure-rule="ensureStructuredFilterRule"
                   @add-rule="addStructuredFilterRule"
@@ -12675,6 +12778,42 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @toggle-value-suggestion="toggleFilterValueSuggestion"
           @toggle-all-value-suggestions="toggleAllFilterValueSuggestions"
           @apply-value-suggestions="applyFilterValueSuggestions"
+        />
+        <DataGridSortWorkbench
+          v-if="canUseWhereSearch && filterEditorView === 'conditions' && sortBuilderOpen"
+          :sql-preview="sortSqlPreview"
+          :rules="structuredSortRules"
+          :columns="filterBuilderColumnOptions"
+          :busy="isApplyingWhere"
+          :apply-only-busy="applyingOnlyStructuredSort"
+          @add-rule="sortBuilder.addRule"
+          @remove-rule="sortBuilder.removeRule"
+          @move-rule="sortBuilder.moveRule"
+          @update-rule="sortBuilder.updateRule"
+          @apply-only="applyOnlyStructuredSortRule"
+          @reset="sortBuilder.reset"
+          @clear="clearStructuredSortRules"
+          @copy-sql="copySortSqlPreview"
+          @apply="applyStructuredSortRules"
+        />
+        <DataGridTextSortWorkbench
+          v-if="canUseWhereSearch && filterEditorView === 'text' && sortBuilderOpen"
+          :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
+          :sql-preview="sortSqlPreview"
+          :rules="structuredSortRules"
+          :columns="filterBuilderColumnOptions"
+          :busy="isApplyingWhere"
+          :apply-only-busy="applyingOnlyStructuredSort"
+          @update:height="updateTextFilterPanelHeight"
+          @add-rule="sortBuilder.addRule"
+          @remove-rule="sortBuilder.removeRule"
+          @move-rule="sortBuilder.moveRule"
+          @update-rule="sortBuilder.updateRule"
+          @apply-only="applyOnlyStructuredSortRule"
+          @reset="sortBuilder.reset"
+          @clear="clearStructuredSortRules"
+          @copy-sql="copySortSqlPreview"
+          @apply="applyStructuredSortRules"
         />
         <!-- Truncation warning banner -->
         <div v-if="showTruncationWarning" class="shrink-0 px-3 py-1 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5">

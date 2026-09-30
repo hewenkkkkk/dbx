@@ -627,7 +627,7 @@ function logDataGridTiming(message: string, payload?: Record<string, unknown>) {
 const emit = defineEmits<{
   reload: [sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
   paginate: [offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean];
-  sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, executionOrderBy?: string];
+  sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string];
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
@@ -3289,7 +3289,7 @@ watch(
     // Switched between paginated and infinite scroll: reset to first page
     if (enabled !== prevEnabled) {
       resetInfiniteScrollState();
-      emit("paginate", 0, pageSize.value, currentWhereInput(), currentOrderBy());
+      emit("paginate", 0, pageSize.value, currentWhereInput(), effectiveOrderBy());
     }
   },
 );
@@ -3494,7 +3494,7 @@ watch(
       if (currentPage.value <= lastPageNum) return;
       currentPage.value = lastPageNum;
       resetGridVerticalScroll(true);
-      emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
+      emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), effectiveOrderBy());
     }
   },
 );
@@ -3545,7 +3545,7 @@ function currentWhereInput(): string | undefined {
   return combineWhereInputs(whereFilterInput.value, appliedStructuredWhereInput.value);
 }
 
-function currentOrderBy(): string | undefined {
+function effectiveOrderBy(): string | undefined {
   const columnOrderBy = sortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
   const manualOrderBy = orderByInput.value.trim() || columnOrderBy;
   return combineDataGridOrderByInputs(manualOrderBy, appliedStructuredOrderByInput.value);
@@ -3560,7 +3560,7 @@ function executeServerPageJump(targetPage: number, updateCurrentPage = false) {
     currentPage.value = targetPage;
   }
   resetGridVerticalScroll(true);
-  emit("paginate", offset, pageSize.value, currentWhereInput(), currentOrderBy());
+  emit("paginate", offset, pageSize.value, currentWhereInput(), effectiveOrderBy());
 }
 
 function requestServerPageJump(targetPage: number, updateCurrentPage = false) {
@@ -3619,7 +3619,7 @@ function firstPage() {
   currentPage.value = 1;
   lastInfiniteScrollPage = 0;
   resetGridVerticalScroll(true);
-  emit("paginate", 0, pageSize.value, currentWhereInput(), currentOrderBy());
+  emit("paginate", 0, pageSize.value, currentWhereInput(), effectiveOrderBy());
 }
 function prevPage() {
   if (currentPage.value <= 1) {
@@ -3631,7 +3631,7 @@ function nextPage() {
   if (!canGoNextPage.value) return;
   currentPage.value++;
   resetGridVerticalScroll(true);
-  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
+  emit("paginate", (currentPage.value - 1) * pageSize.value, pageSize.value, currentWhereInput(), effectiveOrderBy());
 }
 
 function jumpPage(page: number) {
@@ -3670,7 +3670,7 @@ function infiniteScrollNextPage() {
   currentPage.value = nextPageNum;
   // Fetch only the missing segment. Re-reading offset 0 grows transfer and replaces
   // row identities, which would invalidate pending edits while the user scrolls.
-  emit("paginate", nextOffset, nextLimit, currentWhereInput(), currentOrderBy());
+  emit("paginate", nextOffset, nextLimit, currentWhereInput(), effectiveOrderBy());
 }
 
 function selectAndRevealLastLoadedRow() {
@@ -3734,7 +3734,7 @@ function startLoadAllRows(segment: { offset: number; limit: number }) {
   infiniteScrollRequestedOffset = segment.offset;
   infiniteScrollRequestedLimit = segment.limit;
   currentPage.value++;
-  emit("paginate", segment.offset, segment.limit, currentWhereInput(), currentOrderBy(), true);
+  emit("paginate", segment.offset, segment.limit, currentWhereInput(), effectiveOrderBy(), true);
 }
 
 function confirmLoadAllRows() {
@@ -3769,7 +3769,7 @@ function changePageSize(size: number) {
   loadAllRowsActive.value = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
-  emit("paginate", 0, normalizedSize, currentWhereInput(), currentOrderBy());
+  emit("paginate", 0, normalizedSize, currentWhereInput(), effectiveOrderBy());
 }
 
 function setDefaultPageSize() {
@@ -3976,7 +3976,7 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
     context: props.context,
     infiniteScroll: infiniteScrollEnabled.value,
     filterActive: !!currentWhereInput() || hasLocalColumnFilters.value || (dataGridSearchMode.value === "filter" && !!deferredClientSearchText.value),
-    orderActive: !!currentOrderBy(),
+    orderActive: !!effectiveOrderBy(),
     columns: request.columns,
     sourceColumns: props.sourceColumns,
     rows: request.rows,
@@ -4125,7 +4125,7 @@ const editor = useDataGridEditor({
   searchText,
   whereFilterInput,
   currentWhereInput: computed(() => currentWhereInput()),
-  orderByInput: computed(() => currentOrderBy() ?? ""),
+  orderByInput: computed(() => effectiveOrderBy() ?? ""),
   rowStatusFilter,
   dataGridQuickEntryEnabled: computed(() => settingsStore.editorSettings.dataGridQuickEntry),
   confirmDangerousRowDeletion: computed(() => settingsStore.editorSettings.confirmDangerousSqlExecution),
@@ -4644,7 +4644,7 @@ async function reloadTableData(intent: DataGridReloadIntent) {
   }
   markConditionInputsApplied();
   prepareFullReload();
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, resetToFirstPage ? 0 : (currentPage.value - 1) * pageSize.value, intent);
+  emit("reload", props.sql, searchText.value, currentWhereInput(), effectiveOrderBy(), pageSize.value, resetToFirstPage ? 0 : (currentPage.value - 1) * pageSize.value, intent);
 }
 
 function setAutoRefreshInterval(seconds: number) {
@@ -4662,7 +4662,7 @@ async function onToolbarCommit() {
 function onToolbarRollback() {
   discardChanges();
   prepareFullReload();
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
+  emit("reload", props.sql, searchText.value, currentWhereInput(), effectiveOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
 function addRow() {
@@ -5605,7 +5605,7 @@ function currentViewProbe(): string {
     largeValueCells: props.result.large_value_cells,
     navigation: {
       whereInput: currentWhereInput(),
-      orderByInput: currentOrderBy() ?? "",
+      orderByInput: effectiveOrderBy() ?? "",
       pageOffset: props.pageOffset,
       pageLimit: pageSize.value,
       sortColumn: props.sortColumn,
@@ -6584,7 +6584,7 @@ function applyColumnSort(column: string, columnIndex: number, direction: "asc" |
     clearSort();
     syncOrderByInputWithSort(null, null);
   }
-  if (mode === "database" && appliedStructuredOrderByInput.value) emit("sort", column, columnIndex, direction, currentWhereInput(), mode, currentOrderBy());
+  if (mode === "database") emit("sort", column, columnIndex, direction, currentWhereInput(), mode, effectiveOrderBy());
   else emit("sort", column, columnIndex, direction, currentWhereInput(), mode);
 }
 
@@ -6736,7 +6736,7 @@ async function applyWhereFilter() {
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
-      orderBy: currentOrderBy(),
+      orderBy: effectiveOrderBy(),
       limit: pageSize.value,
       injectDefaultTimeSeriesWhere: true,
       whereInput,
@@ -8009,7 +8009,7 @@ async function syncUserFacingSql() {
       includeDatabaseName,
       injectDefaultTimeSeriesWhere: true,
       whereInput: currentWhereInput(),
-      orderBy: currentOrderBy(),
+      orderBy: effectiveOrderBy(),
       limit: footerPage.limit,
       offset: footerPage.offset,
     });
@@ -8020,7 +8020,7 @@ async function syncUserFacingSql() {
 }
 
 watch(
-  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, currentWhereInput(), currentOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
+  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, currentWhereInput(), effectiveOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
   () => void syncUserFacingSql(),
   { immediate: true },
 );
@@ -8087,7 +8087,7 @@ const {
   columnTypes: visibleColumnTypes,
   allColumnTypes,
   whereInput: computed(() => currentWhereInput()),
-  orderBy: computed(() => currentOrderBy()),
+  orderBy: computed(() => effectiveOrderBy()),
   exportBatchSize: computed(() => settingsStore.editorSettings.exportBatchSize),
   hasCellSelection,
   hasColumnSelection,

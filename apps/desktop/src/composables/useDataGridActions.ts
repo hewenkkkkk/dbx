@@ -627,7 +627,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     });
   }
 
-  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database", executionOrderBy?: string) {
+  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database", effectiveOrderBy?: string) {
     const tab = resolveActionTab(tabId);
     if (!tab) return;
     tab.resultSortColumn = direction ? column : undefined;
@@ -650,7 +650,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const config = connectionStore.getConfig(tab.connectionId);
       const quotedColumn = quoteIdent(tab, column);
       const headerOrderBy = direction ? `${config?.db_type === "neo4j" ? `n.${quotedColumn}` : quotedColumn} ${direction.toUpperCase()}` : undefined;
-      const orderBy = executionOrderBy?.trim() || headerOrderBy;
+      const orderBy = effectiveOrderBy === undefined ? headerOrderBy : effectiveOrderBy.trim() || undefined;
       const limit = tableDataPageLimit(tab);
       const pagination = { limit, offset: 0 };
       tab.orderByInput = headerOrderBy;

@@ -1241,7 +1241,7 @@ describe("useDataGridActions", () => {
     expect(tab.resultSortMode).toBe("database");
   });
 
-  it("executes a column sort with the complete combined ORDER BY without exposing the structured part in the input", async () => {
+  it("executes a column sort through the effective ORDER BY channel without exposing the structured part in the input", async () => {
     const tab = tableDataTab({
       resultPageLimit: 7,
       tableMeta: {

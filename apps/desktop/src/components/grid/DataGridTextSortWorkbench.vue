@@ -13,6 +13,7 @@ const props = defineProps<{
   sqlPreview: string;
   rules: readonly DataGridStructuredSortRule[];
   columns: readonly string[];
+  commentByColumn?: ReadonlyMap<string, string>;
   busy?: boolean;
   applyOnlyBusy?: boolean;
 }>();
@@ -128,6 +129,7 @@ watch(
         class="min-w-[460px]"
         :rules="rules"
         :columns="columns"
+        :comment-by-column="commentByColumn"
         :busy="busy"
         :apply-only-busy="applyOnlyBusy"
         layout="text"

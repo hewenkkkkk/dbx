@@ -28,6 +28,7 @@ const props = defineProps<{
   whereInput: string;
   orderByInput: string;
   columns: readonly string[];
+  commentByColumn?: ReadonlyMap<string, string>;
   conditionColumns: readonly DataGridConditionColumnOption[];
   identifierQuote?: string;
   historyScope: DataGridConditionHistoryScope;
@@ -343,6 +344,7 @@ onUnmounted(onResizeEnd);
             <DataGridSortBuilder
               :rules="sortRules ?? []"
               :columns="columns"
+              :comment-by-column="commentByColumn"
               :busy="sortBuilderBusy"
               :apply-only-busy="sortApplyOnlyBusy"
               @add="emit('addSortRule')"

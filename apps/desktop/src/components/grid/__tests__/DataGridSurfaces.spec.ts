@@ -1117,6 +1117,22 @@ describe("DataGridSortBuilder", () => {
     expect(options).not.toContain("display_name");
   });
 
+  it("matches fields by column comment from the searchable selector", async () => {
+    const mounted = mountComponent(DataGridSortBuilder, {
+      rules: [{ id: "r1", columnName: "", direction: "asc" }],
+      columns: ["customer_name", "created_at"],
+      commentByColumn: new Map([["customer_name", "客户名称 / Customer Name"]]),
+    });
+
+    const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
+    dispatch(searchInput, "input", { target: { value: "客户" } });
+    await nextTick();
+
+    const options = findAll(mounted.root, (node) => node.props["data-stub"] === "SelectItem").map(hostText);
+    expect(options).toContain("customer_name");
+    expect(options).not.toContain("created_at");
+  });
+
   it("keeps an already selected field available for another sort rule", () => {
     const mounted = mountComponent(DataGridSortBuilder, {
       rules: [

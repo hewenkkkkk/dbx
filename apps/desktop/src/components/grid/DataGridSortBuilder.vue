@@ -19,6 +19,7 @@ const props = withDefaults(
   defineProps<{
     rules: readonly DataGridStructuredSortRule[];
     columns: readonly string[];
+    commentByColumn?: ReadonlyMap<string, string>;
     busy?: boolean;
     applyOnlyBusy?: boolean;
     showHeader?: boolean;
@@ -65,7 +66,10 @@ const hasIncompleteActiveRule = computed(() => props.rules.some((rule) => !rule.
 
 function filteredColumns(rule: DataGridStructuredSortRule): string[] {
   const query = columnSearches.value[rule.id]?.trim() ?? "";
-  return query ? props.columns.filter((column) => matchesIdentifierSearch(column, query)) : [...props.columns];
+  if (!query) return [...props.columns];
+  // Match column comments too, mirroring the filter builder's comment search (#10759).
+  const comments = props.commentByColumn;
+  return props.columns.filter((column) => matchesIdentifierSearch(column, query) || matchesIdentifierSearch(comments?.get(column) ?? comments?.get(column.toLowerCase()) ?? "", query));
 }
 
 function setRuleElement(id: string, element: unknown) {

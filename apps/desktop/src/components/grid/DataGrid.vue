@@ -630,6 +630,7 @@ const emit = defineEmits<{
   sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string];
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
+  "update:structuredOrderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
   changeQueryTimeout: [connectionId: string];
   cancel: [];
@@ -6671,7 +6672,12 @@ async function applyOrderBySearch(_value?: string, structuredOrderByOverride?: s
   const sortScopeKey = sortBuilderScopeKey.value;
   const sortCacheKey = structuredFilterCacheKey.value;
   emit("update:orderByInput", orderByInput.value);
-  if (orderByClause) rememberDataGridConditionHistory("orderBy", conditionHistoryScope.value, orderByClause);
+  // Mirror applyWhereFilter's push into tab state: the structured clause lives
+  // in its own tab field so store-side rebuilds keep the composite ORDER BY
+  // while the manual input stays free of the structured terms.
+  emit("update:structuredOrderByInput", structuredOrderBy ?? "");
+  const manualOrderByClause = orderByInput.value.trim();
+  if (manualOrderByClause) rememberDataGridConditionHistory("orderBy", conditionHistoryScope.value, manualOrderByClause);
   isApplyingWhere.value = true;
   queryControlError.value = "";
   currentPage.value = 1;
@@ -12563,6 +12569,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :sort-builder-open="sortBuilderOpen"
                   :filter-editor-view="filterEditorView"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
+                  :comment-by-column="columnCommentMap"
                   :condition-columns="conditionColumns"
                   :identifier-quote="conditionIdentifierQuote"
                   :history-scope="conditionHistoryScope"
@@ -12802,6 +12809,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           :sql-preview="sortSqlPreview"
           :rules="structuredSortRules"
           :columns="filterBuilderColumnOptions"
+          :comment-by-column="columnCommentMap"
           :busy="isApplyingWhere"
           :apply-only-busy="applyingOnlyStructuredSort"
           @add-rule="sortBuilder.addRule"
@@ -12820,6 +12828,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           :sql-preview="sortSqlPreview"
           :rules="structuredSortRules"
           :columns="filterBuilderColumnOptions"
+          :comment-by-column="columnCommentMap"
           :busy="isApplyingWhere"
           :apply-only-busy="applyingOnlyStructuredSort"
           @update:height="updateTextFilterPanelHeight"
